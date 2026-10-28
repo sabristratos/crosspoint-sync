@@ -21,6 +21,7 @@ import { bookorbitExclusions, readBookorbitStats } from '../../models/bookorbit-
 
 import { parseReadingSession } from '../../models/reading-sessions.js';
 import { importBookorbitStats } from '../../connectors/bookorbit-stats.js';
+import { fanOutBookStats } from '../../connectors/fanout.js';
 
 const MAX_BOOK_BATCH = 20;
 const DEFAULT_BOOK_PAGE = 50;
@@ -251,6 +252,8 @@ export function statsRoutes(db: DB, http?: HttpTransport): Hono<AppEnv> {
         for (const d of p.daily) upsertDay.run(user.id, deviceId, p.document, d.date, d.seconds, now);
       }
     });
+    const device = typeof o.device === 'string' ? o.device.slice(0, 128) : '';
+    for (const p of parsed) fanOutBookStats(db, user.id, p.document, { deviceId, device, book: p.snapshot }, now);
     return c.json({ until: now, accepted: parsed.length, accepted_daily: parsed.reduce((n, p) => n + p.daily.length, 0) });
   });
 

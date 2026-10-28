@@ -129,6 +129,17 @@ export function fanOutHighlight(
   fanOut(db, userId, { kind: 'highlight', document, timestamp, highlight: h }, `highlight:${clippingId}`, exceptConnectorId);
 }
 
+export function fanOutBookStats(
+  db: DB,
+  userId: number,
+  document: string,
+  stats: NonNullable<OutboundEvent['stats']>,
+  timestamp: number
+): void {
+  // Totals replace the same device's earlier snapshot, but two devices on one book must not overwrite each other.
+  fanOut(db, userId, { kind: 'stats', document, timestamp, stats }, `stats:${stats.deviceId}`);
+}
+
 /**
  * Backfill a single connector with everything already synced ("Sync now").
  * Enqueues the latest progress per document (and highlights, if it carries

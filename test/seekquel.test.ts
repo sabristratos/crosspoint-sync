@@ -31,6 +31,11 @@ const progressEvent = (over: Partial<OutboundEvent> = {}): OutboundEvent => ({
   ...over,
 });
 const body = (call: { body?: string }) => JSON.parse(call.body ?? '{}');
+const BOOK_STATS = {
+  v: 5, sessions: 9, seconds: 8400, pages: 310, completed: false, avg_fwd: 12, pace_n: 250, eta: 5400,
+  start_manual: false, finish_manual: false, start_date: 1751000000, finished_date: 0,
+  tod: [0, 3000, 4000, 1400], dow: [0, 0, 1200, 0, 2000, 3000, 2200],
+};
 
 const KEY = { TOKEN_ENC_KEY: 'a'.repeat(64) };
 beforeEach(() => { Object.assign(process.env, KEY); resetEncryptionKeyCache(); });
@@ -173,6 +178,23 @@ describe('seekquel connector (unit)', () => {
     expect(finished).toMatchObject({ ok: false, retryable: true, error: expect.stringContaining('Seekquel') });
   });
 
+  it('sends a device\'s book totals in the shape Seekquel reads, and treats a closed route as final', async () => {
+    const fake = fakeTransport();
+    const event: OutboundEvent = { kind: 'stats', document: DOC, timestamp: 1_760_000_000, stats: { deviceId: 'crossink-9F8E7D6C', device: 'CrossInk', book: BOOK_STATS } };
+    expect(await seekquelConnector.push(CRED, MATCH, event, fake.transport)).toEqual({ ok: true });
+    expect(fake.calls[0]).toMatchObject({ method: 'PUT', url: `${SERVER}/api/v1/stats/books` });
+    expect(fake.calls[0].headers?.['x-auth-user']).toBe(CRED.key);
+    expect(body(fake.calls[0])).toEqual({ device_id: 'crossink-9F8E7D6C', device: 'CrossInk', items: [{ document: DOC, ...BOOK_STATS }] });
+
+    fake.on('/api/v1/stats/books', 404, {});
+    expect(await seekquelConnector.push(CRED, MATCH, event, fake.transport)).toEqual({ ok: true });
+    fake.on('/api/v1/stats/books', 422, {});
+    expect(await seekquelConnector.push(CRED, MATCH, event, fake.transport)).toMatchObject({ ok: false, retryable: false });
+    fake.on('/api/v1/stats/books', 503, {});
+    expect(await seekquelConnector.push(CRED, MATCH, event, fake.transport)).toMatchObject({ ok: false, retryable: true });
+    expect(await seekquelConnector.push(CRED, MATCH, { kind: 'stats', document: DOC, timestamp: 1 }, fake.transport)).toMatchObject({ ok: false, retryable: false });
+  });
+
   it('asks to link again on 401, gives up on 403 without asking, and retries on 429 and server errors', async () => {
     const fake = fakeTransport();
     fake.on('/syncs/progress', 401, {});
@@ -262,6 +284,40 @@ describe('seekquel connector (end to end)', () => {
     expect(statusCalls()).toBe(1);
     await sync(1);
     expect(statusCalls()).toBe(2);
+  });
+
+  it('forwards a CrossInk reader\'s book totals once they are uploaded, one snapshot per device', async () => {
+    const fake = fakeTransport();
+    const { app, db, headers, linked } = await linkSeekquel(fake);
+    expect(linked).toBe(true);
+    const put = (device_id: string, device: string, seconds: number) => app.request('/api/v1/stats/books', {
+      method: 'PUT',
+      headers,
+      body: JSON.stringify({ device_id, device, items: [{ document: DOC, ...BOOK_STATS, seconds }] }),
+    });
+    expect((await put('crossink-aaaa', 'CrossInk', 600)).status).toBe(200);
+    expect((await put('crossink-aaaa', 'CrossInk', 900)).status).toBe(200);
+    expect((await put('crossink-bbbb', 'CrossInk', 300)).status).toBe(200);
+    await drainQueue(db, fake.transport, 10);
+
+    const sent = fake.calls.filter((c) => c.url.endsWith('/api/v1/stats/books')).map(body);
+    expect(sent).toHaveLength(2);
+    expect(sent.find((s) => s.device_id === 'crossink-aaaa')).toMatchObject({ device: 'CrossInk', items: [{ document: DOC, seconds: 900 }] });
+    expect(sent.find((s) => s.device_id === 'crossink-bbbb')).toMatchObject({ items: [{ document: DOC, seconds: 300 }] });
+  });
+
+  it('forwards nothing for a book whose upload Seekquel was never linked for', async () => {
+    const fake = fakeTransport();
+    const { app, db } = makeTestApp({}, { connectorTransport: fake.transport });
+    const { headers } = await registerUser(app);
+    const res = await app.request('/api/v1/stats/books', {
+      method: 'PUT',
+      headers,
+      body: JSON.stringify({ device_id: 'crossink-aaaa', device: 'CrossInk', items: [{ document: DOC, ...BOOK_STATS }] }),
+    });
+    expect(res.status).toBe(200);
+    await drainQueue(db, fake.transport, 10);
+    expect(fake.calls).toHaveLength(0);
   });
 
   it('does not store a link whose key Seekquel refuses', async () => {

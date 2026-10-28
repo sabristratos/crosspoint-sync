@@ -38,6 +38,11 @@ import type {
  * back below the end. Every sync of a book at 100% fans out as 'finished', and
  * re-sending Read each time would undo a re-read the reader started in Seekquel
  * while the device still shows the old copy at the end.
+ *
+ * Reading time comes from a device that reports per-book totals (CrossInk). Each
+ * total replaces that device's last one and Seekquel credits what it adds, so a
+ * resend is harmless. A Seekquel that has the route closed answers 404, which is
+ * final and not an error: nothing is dead-lettered for it.
  */
 
 const DEFAULT_BASE = 'https://api.seekquel.app';
@@ -47,6 +52,7 @@ const ACCEPT = 'application/vnd.koreader.v1+json';
 const MAX_TEXT = 500;
 const MAX_XPATH = 120;
 const NOT_LINKED = 409;
+const NOT_FOUND = 404;
 const CONNECTOR_ID = 'seekquel';
 const NOT_LINKED_ERROR = 'not linked to a book in Seekquel yet; choose the book in Seekquel, then Sync now';
 
@@ -230,6 +236,22 @@ async function pushHighlight(c: SeekquelCred, m: Match, ev: OutboundEvent, http:
   return res.status >= 200 && res.status < 300 ? { ok: true } : failure(res.status, 'highlight');
 }
 
+async function pushStats(c: SeekquelCred, m: Match, ev: OutboundEvent, http: HttpTransport): Promise<PushResult> {
+  const stats = ev.stats;
+  if (!stats) return { ok: false, retryable: false, error: 'empty stats' };
+  const res = await http(`${c.server}/api/v1/stats/books`, {
+    method: 'PUT',
+    headers: headers(c),
+    body: JSON.stringify({
+      device_id: stats.deviceId,
+      device: stats.device,
+      items: [{ document: m.externalId, ...stats.book }],
+    }),
+  });
+  if (res.status === NOT_FOUND) return { ok: true };
+  return res.status >= 200 && res.status < 300 ? { ok: true } : failure(res.status, 'stats');
+}
+
 async function push(
   cred: Credential,
   m: Match,
@@ -241,6 +263,7 @@ async function push(
   if (!c) return { ok: false, retryable: false, needsReauth: true, error: 'bad credential' };
   try {
     if (ev.kind === 'highlight') return await pushHighlight(c, m, ev, http);
+    if (ev.kind === 'stats') return await pushStats(c, m, ev, http);
     const progress = await pushProgress(c, m, ev, http, ctx);
     if (!progress.ok) return progress;
     if (ev.kind !== 'finished') {
@@ -309,7 +332,7 @@ export const seekquelConnector: Connector = {
   displayName: 'Seekquel',
   tier: 1,
   capabilities: { read: false, write: true },
-  carries: ['progress', 'finished', 'highlight'],
+  carries: ['progress', 'finished', 'highlight', 'stats'],
   credentialKind: 'device_code',
   beta: true,
   // Keyed by our document hash: Seekquel matches the file itself, so always send.
